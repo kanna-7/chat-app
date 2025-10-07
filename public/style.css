@@ -1,0 +1,11 @@
+/* style.css */
+body { font-family: Arial, sans-serif; background: #f2f6fb; color: #222; padding: 20px; }
+.container { max-width: 1000px; margin: 0 auto; }
+.box { background: #fff; padding: 20px; border-radius: 10px; box-shadow: 0 6px 18px rgba(0,0,0,0.06); text-align: center; }
+input, button { padding: 8px 10px; margin: 6px 0; border-radius: 6px; border: 1px solid #ddd; }
+button { cursor: pointer; }
+.btn { display:inline-block; padding:8px 12px; background:#007bff;color:#fff;border-radius:6px;text-decoration:none; }
+.userRow { display:flex; justify-content:space-between; align-items:center; padding:6px 0; border-bottom:1px dashed #eee; }
+.messages { max-height: 480px; overflow-y: auto; }
+.message { margin-bottom: 10px; padding: 6px; background: #fff; border-radius: 6px; border: 1px solid #eee; }
+.message .meta { font-size: 12px; color:#666; }

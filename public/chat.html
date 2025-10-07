@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Chat</title>
+  <link rel="stylesheet" href="style.css" />
+  <style>
+    /* inline extra layout */
+    .layout { display:flex; gap:16px; }
+    .panel { border:1px solid #ddd; padding:10px; border-radius:8px; background:#fff; }
+    .left { width: 260px; }
+    .center { flex:1; display:flex; flex-direction:column; max-height:80vh; }
+    .users-list, .friends-list { max-height: 300px; overflow:auto; }
+    .messages { flex:1; overflow:auto; padding:8px; border:1px solid #eee; border-radius:6px; background:#fafafa; }
+    .message { margin-bottom:10px; }
+    .message .meta { font-size:12px; color:#666; }
+    .message img { max-width:300px; border-radius:6px; display:block; margin-top:6px; }
+    .composer { display:flex; gap:8px; margin-top:8px; }
+    .composer input[type=text] { flex:1; padding:8px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Chat App</h1>
+    <div id="me-info"></div>
+    <div class="layout">
+      <div class="panel left">
+        <h3>All Accounts</h3>
+        <div id="users" class="users-list"></div>
+        <h3>Your Friends</h3>
+        <div id="friends" class="friends-list"></div>
+        <p><a href="/logout">Logout</a></p>
+      </div>
+
+      <div class="panel center">
+        <h3 id="chatWithTitle">Select a friend to chat</h3>
+        <div id="messages" class="messages"></div>
+
+        <div id="composerArea" style="display:none">
+          <form id="sendForm" class="composer">
+            <input id="textInput" type="text" placeholder="Type a message..." />
+            <button type="submit">Send</button>
+          </form>
+
+          <form id="imageUploadForm" class="composer" enctype="multipart/form-data">
+            <input type="file" id="imageFile" accept="image/*" />
+            <button id="sendImageBtn" type="button">Send Image</button>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    let me = null;
+    let currentFriend = null;
+    const socket = io();
+
+    async function init() {
+      const r = await fetch('/me', { credentials: 'same-origin' });
+      const j = await r.json();
+      if (!j.loggedIn) {
+        window.location = "/login.html";
+        return;
+      }
+      me = j.user;
+      document.getElementById('me-info').innerText = `Signed in as: ${me.display_name || me.username}`;
+      socket.emit('registerSocket', me);
+
+      socket.on('incomingMessage', (msg) => {
+        const otherId = (msg.sender_id === me.id) ? msg.receiver_id : msg.sender_id;
+        if (currentFriend && Number(otherId) === Number(currentFriend.id)) {
+          appendMessage(msg);
+        }
+      });
+
+      socket.on('onlineUpdate', (list) => {
+        loadUsers();
+      });
+
+      await loadUsers();
+      await loadFriends();
+    }
+
+    async function loadUsers() {
+      const res = await fetch('/users', { credentials: 'same-origin' });
+      if (!res.ok) return;
+      const users = await res.json();
+      const container = document.getElementById('users');
+      container.innerHTML = '';
+      users.forEach(u => {
+        const div = document.createElement('div');
+        div.className = 'userRow';
+        div.innerHTML = `<b>${u.display_name || u.username}</b> (${u.username}) 
+          ${u.isFriend ? '(friend)' : ''}
+          <button data-id="${u.id}">${u.isFriend ? 'Chat' : 'Add Friend'}</button>`;
+        const btn = div.querySelector('button');
+        btn.addEventListener('click', async () => {
+          if (!u.isFriend) {
+            await fetch('/add-friend', {
+              method: 'POST',
+              headers: {'Content-Type':'application/json'},
+              credentials: 'same-origin',
+              body: JSON.stringify({ friendId: u.id })
+            });
+            await loadUsers();
+            await loadFriends();
+          } else {
+            openChatWith(u);
+          }
+        });
+        container.appendChild(div);
+      });
+    }
+
+    async function loadFriends() {
+      const res = await fetch('/friends', { credentials: 'same-origin' });
+      const friends = await res.json();
+      const container = document.getElementById('friends');
+      container.innerHTML = '';
+      friends.forEach(f => {
+        const div = document.createElement('div');
+        div.innerHTML = `<b>${f.display_name || f.username}</b> (${f.username}) <button data-id="${f.id}">Chat</button>`;
+        div.querySelector('button').addEventListener('click', () => openChatWith(f));
+        container.appendChild(div);
+      });
+    }
+
+    async function openChatWith(friend) {
+      currentFriend = friend;
+      document.getElementById('chatWithTitle').innerText = `Chat with ${friend.display_name || friend.username}`;
+      document.getElementById('composerArea').style.display = 'block';
+      document.getElementById('messages').innerHTML = '';
+      // load history
+      const res = await fetch(`/messages?with=${friend.id}`, { credentials: 'same-origin' });
+      const history = await res.json();
+      history.forEach(appendMessage);
+    }
+
+    function appendMessage(msg) {
+      const div = document.createElement('div');
+      div.className = 'message';
+      const fromMe = Number(msg.sender_id) === Number(me.id);
+      const who = fromMe ? 'You' : (msg.sender_username || 'Friend');
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      meta.innerText = `${who} • ${new Date(msg.timestamp).toLocaleString()}`;
+      const content = document.createElement('div');
+      if (msg.message) {
+        const p = document.createElement('div');
+        p.innerText = msg.message;
+        content.appendChild(p);
+      }
+      if (msg.image_url) {
+        const img = document.createElement('img');
+        img.src = msg.image_url;
+        content.appendChild(img);
+      }
+      div.appendChild(meta);
+      div.appendChild(content);
+      document.getElementById('messages').appendChild(div);
+      document.getElementById('messages').scrollTop = document.getElementById('messages').scrollHeight;
+    }
+
+    // sending text
+    document.getElementById('sendForm').addEventListener('submit', (e) => {
+      e.preventDefault();
+      if (!currentFriend) return alert('Select a friend to chat');
+      const text = document.getElementById('textInput').value.trim();
+      if (!text) return;
+      socket.emit('privateMessage', { from: me.id, to: currentFriend.id, text });
+      document.getElementById('textInput').value = '';
+    });
+
+    // image upload
+    document.getElementById('sendImageBtn').addEventListener('click', async () => {
+      if (!currentFriend) return alert('Select a friend to chat');
+      const fileInput = document.getElementById('imageFile');
+      if (!fileInput.files.length) return alert('Choose an image first');
+      const fd = new FormData();
+      fd.append('image', fileInput.files[0]);
+      const res = await fetch('/upload', { method: 'POST', credentials: 'same-origin', body: fd });
+      const j = await res.json();
+      if (j.imageUrl) {
+        socket.emit('privateMessage', { from: me.id, to: currentFriend.id, imageUrl: j.imageUrl });
+        fileInput.value = '';
+      } else {
+        alert('Upload failed');
+      }
+    });
+
+    init();
+  </script>
+</body>
+</html>
