@@ -39,7 +39,8 @@ CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   username TEXT UNIQUE NOT NULL,
   password_hash TEXT NOT NULL,
-  display_name TEXT
+  display_name TEXT,
+  is_admin INTEGER DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS friends (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -56,6 +57,16 @@ CREATE TABLE IF NOT EXISTS messages (
   timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 `);
+
+const adminUser = db.prepare("SELECT id FROM users WHERE username = ?").get("admin");
+const hash = bcrypt.hashSync("12345", 10);
+if (!adminUser) {
+  db.prepare("INSERT INTO users (username, password_hash, display_name, is_admin) VALUES (?, ?, ?, 1)")
+    .run("admin", hash, "Admin");
+} else {
+  db.prepare("UPDATE users SET password_hash = ?, is_admin = 1 WHERE username = ?")
+    .run(hash, "admin");
+}
 
 // Multer for uploads
 const uploadsDir = path.join(__dirname, "public", "uploads");
@@ -83,7 +94,7 @@ function requireLogin(req, res, next) {
 app.get("/me", (req, res) => {
   if (!req.session.userId) return res.json({ loggedIn: false });
   const row = db
-    .prepare("SELECT id, username, display_name FROM users WHERE id = ?")
+    .prepare("SELECT id, username, display_name, is_admin FROM users WHERE id = ?")
     .get(req.session.userId);
   if (!row) return res.json({ loggedIn: false });
   res.json({ loggedIn: true, user: row });
@@ -106,16 +117,34 @@ app.post("/register", async (req, res) => {
   }
 });
 
+// Register admin
+app.post("/register-admin", async (req, res) => {
+  const { username, password, display_name } = req.body;
+  if (!username || !password) return res.json({ error: "Missing fields" });
+
+  const exists = db.prepare("SELECT id FROM users WHERE username = ?").get(username);
+  if (exists) return res.json({ error: "Username taken" });
+
+  const hash = await bcrypt.hash(password, 10);
+
+  const info = db.prepare(
+    "INSERT INTO users (username, password_hash, display_name, is_admin) VALUES (?, ?, ?, 1)"
+  ).run(username, hash, display_name || null);
+
+  req.session.userId = info.lastInsertRowid;
+  res.json({ ok: true, is_admin: 1 });
+});
+
 // Login
 app.post("/login", async (req, res) => {
   const { username, password } = req.body || {};
   if (!username || !password) return res.status(400).json({ success: false, message: "username/password required" });
-  const row = db.prepare("SELECT id, password_hash, display_name FROM users WHERE username = ?").get(username);
+  const row = db.prepare("SELECT id, password_hash, display_name, is_admin FROM users WHERE username = ?").get(username);
   if (!row) return res.json({ success: false, message: "Invalid username or password" });
   const ok = await bcrypt.compare(password, row.password_hash);
   if (!ok) return res.json({ success: false, message: "Invalid username or password" });
   req.session.userId = row.id;
-  return res.json({ success: true });
+  return res.json({ success: true, is_admin: row.is_admin });
 });
 
 // Logout
@@ -125,12 +154,14 @@ app.get("/logout", (req, res) => {
 
 // Get all other users + friend status
 app.get("/users", requireLogin, (req, res) => {
-  const me = req.session.userId;
-  const users = db.prepare("SELECT id, username, display_name FROM users WHERE id != ?").all(me);
-  const friends = db.prepare("SELECT friend_id FROM friends WHERE user_id = ?").all(me).map(r => r.friend_id);
-  const friendSet = new Set(friends);
-  const out = users.map(u => ({ ...u, isFriend: friendSet.has(u.id) }));
-  res.json(out);
+  const allUsers = db.prepare("SELECT id, username, display_name FROM users").all();
+  // Optionally, mark friends for the current user
+  const friends = db.prepare("SELECT friend_id FROM friends WHERE user_id = ?").all(req.session.userId).map(f => f.friend_id);
+  const users = allUsers.map(u => ({
+    ...u,
+    isFriend: friends.includes(u.id)
+  }));
+  res.json(users);
 });
 
 // Add friend (one-way)
@@ -220,6 +251,24 @@ io.on("connection", (socket) => {
     io.emit("onlineUpdate", Array.from(userSocketMap.keys()));
     console.log("socket disconnected:", socket.id);
   });
+});
+
+// Middleware to check if user is admin
+function requireAdmin(req, res, next) {
+  const user = db.prepare("SELECT is_admin FROM users WHERE id = ?").get(req.session.userId);
+  if (!user || !user.is_admin) return res.status(403).json({ error: "admin only" });
+  next();
+}
+
+// Route for admin to delete accounts
+app.post("/admin/delete-user", requireLogin, requireAdmin, (req, res) => {
+  const userId = Number(req.body.userId);
+  if (!userId) return res.status(400).json({ error: "missing userId" });
+  if (userId === req.session.userId) return res.status(400).json({ error: "cannot delete yourself" });
+  db.prepare("DELETE FROM users WHERE id = ?").run(userId);
+  db.prepare("DELETE FROM friends WHERE user_id = ? OR friend_id = ?").run(userId, userId);
+  db.prepare("DELETE FROM messages WHERE sender_id = ? OR receiver_id = ?").run(userId, userId);
+  res.json({ ok: true });
 });
 
 // Start server
